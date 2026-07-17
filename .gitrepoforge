@@ -1,0 +1,14 @@
+name: mcp-filter-proxy
+default_branch: main
+config:
+  description: "An MCP server that proxies requests to a remote MCP server while supporting tool filtering and auth header injection."
+  license: MIT
+  language: go
+  release: release-go
+  justfile: true
+  status: wip
+  release_github: false
+  codecov:
+    enabled: false
+  docs:
+    enabled: false
