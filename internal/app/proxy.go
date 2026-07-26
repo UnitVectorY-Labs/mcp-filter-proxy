@@ -8,20 +8,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/client/transport"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type proxy struct {
 	config  Config
 	version string
 	filter  toolFilter
-	remote  *client.Client
-	server  *server.MCPServer
+	remote  *mcp.ClientSession
+	server  *mcp.Server
 	auth    *tokenManager
 	syncMu  sync.Mutex
+	httpServer *http.Server
 }
 
 func newProxy(ctx context.Context, config Config, version string) (*proxy, error) {
@@ -35,50 +33,42 @@ func newProxy(ctx context.Context, config Config, version string) (*proxy, error
 		return nil, err
 	}
 	remoteHTTP := &http.Client{Transport: headerTransport{base: http.DefaultTransport, headers: config.Headers, auth: p}}
-	t, err := transport.NewStreamableHTTP(config.RemoteURL, transport.WithHTTPBasicClient(remoteHTTP), transport.WithContinuousListening())
-	if err != nil {
-		return nil, err
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   config.RemoteURL,
+		HTTPClient: remoteHTTP,
 	}
-	p.remote = client.NewClient(t)
-	if err := p.remote.Start(ctx); err != nil {
+	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-filter-proxy", Version: version}, &mcp.ClientOptions{
+		ToolListChangedHandler: func(ctx context.Context, _ *mcp.ToolListChangedRequest) {
+			go func() {
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_ = p.refreshTools(refreshCtx)
+			}()
+		},
+		ResourceListChangedHandler: func(ctx context.Context, _ *mcp.ResourceListChangedRequest) {
+			go func() {
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				p.refreshResources(refreshCtx)
+				p.refreshResourceTemplates(refreshCtx)
+			}()
+		},
+		PromptListChangedHandler: func(ctx context.Context, _ *mcp.PromptListChangedRequest) {
+			go func() {
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				p.refreshPrompts(refreshCtx)
+			}()
+		},
+	})
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
 		return nil, fmt.Errorf("remote connection: %w", err)
 	}
-	init := mcp.InitializeRequest{}
-	init.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	init.Params.ClientInfo = mcp.Implementation{Name: "mcp-filter-proxy", Version: version}
-	init.Params.Capabilities = mcp.ClientCapabilities{}
-	if _, err := p.remote.Initialize(ctx, init); err != nil {
-		return nil, fmt.Errorf("remote initialization: %w", err)
-	}
-	hooks := &server.Hooks{}
-	p.server = server.NewMCPServer("mcp-filter-proxy", version, server.WithHooks(hooks), server.WithToolFilter(func(_ context.Context, tools []mcp.Tool) []mcp.Tool {
-		out := make([]mcp.Tool, 0, len(tools))
-		for _, tool := range tools {
-			if p.filter.allowed(tool.Name) {
-				out = append(out, tool)
-			}
-		}
-		return out
-	}))
-	hooks.AddBeforeListTools(func(ctx context.Context, _ any, _ *mcp.ListToolsRequest) { _ = p.refreshTools(ctx) })
-	hooks.AddBeforeListResources(func(ctx context.Context, _ any, _ *mcp.ListResourcesRequest) { p.refreshResources(ctx) })
-	hooks.AddBeforeListResourceTemplates(func(ctx context.Context, _ any, _ *mcp.ListResourceTemplatesRequest) { p.refreshResourceTemplates(ctx) })
-	hooks.AddBeforeListPrompts(func(ctx context.Context, _ any, _ *mcp.ListPromptsRequest) { p.refreshPrompts(ctx) })
-	p.remote.OnNotification(func(notification mcp.JSONRPCNotification) {
-		refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		switch notification.Method {
-		case mcp.MethodNotificationToolsListChanged:
-			_ = p.refreshTools(refreshCtx)
-		case mcp.MethodNotificationResourcesListChanged:
-			p.refreshResources(refreshCtx)
-			p.refreshResourceTemplates(refreshCtx)
-		case mcp.MethodNotificationPromptsListChanged:
-			p.refreshPrompts(refreshCtx)
-		}
-	})
+	p.remote = session
+	p.server = mcp.NewServer(&mcp.Implementation{Name: "mcp-filter-proxy", Version: version}, nil)
 	if err := p.refreshTools(ctx); err != nil {
-		_ = p.remote.Close()
+		p.remote.Close()
 		return nil, err
 	}
 	p.refreshResources(ctx)
@@ -88,93 +78,109 @@ func newProxy(ctx context.Context, config Config, version string) (*proxy, error
 }
 
 func (p *proxy) refreshTools(ctx context.Context) error {
-	p.syncMu.Lock()
-	defer p.syncMu.Unlock()
-	tools, err := p.remote.ListTools(ctx, mcp.ListToolsRequest{})
+	toolsResult, err := p.remote.ListTools(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("list remote tools: %w", err)
 	}
-	local := make([]server.ServerTool, 0, len(tools.Tools))
-	for _, tool := range tools.Tools {
+	p.syncMu.Lock()
+	defer p.syncMu.Unlock()
+	for _, tool := range toolsResult.Tools {
+		if !p.filter.allowed(tool.Name) {
+			continue
+		}
 		tool := tool
-		local = append(local, server.ServerTool{Tool: tool, Handler: func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		p.server.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			if !p.filter.allowed(req.Params.Name) {
-				return mcp.NewToolResultError("tool not found"), nil
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: "tool not found"}},
+					IsError: true,
+				}, nil
 			}
-			return p.remote.CallTool(ctx, req)
-		}})
+			result, err := p.remote.CallTool(ctx, &mcp.CallToolParams{
+				Name:      req.Params.Name,
+				Arguments: req.Params.Arguments,
+			})
+			if err != nil {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+					IsError: true,
+				}, nil
+			}
+			return result, nil
+		})
 	}
-	p.server.SetTools(local...)
 	return nil
 }
+
 func (p *proxy) refreshResources(ctx context.Context) {
-	resources, err := p.remote.ListResources(ctx, mcp.ListResourcesRequest{})
+	resourcesResult, err := p.remote.ListResources(ctx, nil)
 	if err != nil {
 		return
 	}
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
-	local := make([]server.ServerResource, 0, len(resources.Resources))
-	for _, resource := range resources.Resources {
+	for _, resource := range resourcesResult.Resources {
 		resource := resource
-		local = append(local, server.ServerResource{Resource: resource, Handler: func(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-			result, err := p.remote.ReadResource(ctx, req)
-			if err != nil {
-				return nil, err
-			}
-			return result.Contents, nil
-		}})
+		p.server.AddResource(resource, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			return p.remote.ReadResource(ctx, &mcp.ReadResourceParams{URI: req.Params.URI})
+		})
 	}
-	p.server.SetResources(local...)
 }
+
 func (p *proxy) refreshResourceTemplates(ctx context.Context) {
-	templates, err := p.remote.ListResourceTemplates(ctx, mcp.ListResourceTemplatesRequest{})
+	templatesResult, err := p.remote.ListResourceTemplates(ctx, nil)
 	if err != nil {
 		return
 	}
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
-	local := make([]server.ServerResourceTemplate, 0, len(templates.ResourceTemplates))
-	for _, template := range templates.ResourceTemplates {
+	for _, template := range templatesResult.ResourceTemplates {
 		template := template
-		local = append(local, server.ServerResourceTemplate{Template: template, Handler: func(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-			result, err := p.remote.ReadResource(ctx, req)
-			if err != nil {
-				return nil, err
-			}
-			return result.Contents, nil
-		}})
+		p.server.AddResourceTemplate(template, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			return p.remote.ReadResource(ctx, &mcp.ReadResourceParams{URI: req.Params.URI})
+		})
 	}
-	p.server.SetResourceTemplates(local...)
 }
+
 func (p *proxy) refreshPrompts(ctx context.Context) {
-	prompts, err := p.remote.ListPrompts(ctx, mcp.ListPromptsRequest{})
+	promptsResult, err := p.remote.ListPrompts(ctx, nil)
 	if err != nil {
 		return
 	}
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
-	local := make([]server.ServerPrompt, 0, len(prompts.Prompts))
-	for _, prompt := range prompts.Prompts {
+	for _, prompt := range promptsResult.Prompts {
 		prompt := prompt
-		local = append(local, server.ServerPrompt{Prompt: prompt, Handler: func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-			return p.remote.GetPrompt(ctx, req)
-		}})
+		p.server.AddPrompt(prompt, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return p.remote.GetPrompt(ctx, &mcp.GetPromptParams{
+				Name:      req.Params.Name,
+				Arguments: req.Params.Arguments,
+			})
+		})
 	}
-	p.server.SetPrompts(local...)
 }
+
 func (p *proxy) Serve() error {
 	if p.config.Transport == "http" {
-		return server.NewStreamableHTTPServer(p.server).Start(p.config.ListenAddr)
+		handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+			return p.server
+		}, nil)
+		p.httpServer = &http.Server{Addr: p.config.ListenAddr, Handler: handler}
+		return p.httpServer.ListenAndServe()
 	}
-	return server.ServeStdio(p.server)
+	return p.server.Run(context.Background(), &mcp.StdioTransport{})
 }
+
 func (p *proxy) Close() error {
+	if p.httpServer != nil {
+		p.httpServer.Close()
+	}
 	if p.remote != nil {
-		return p.remote.Close()
+		p.remote.Close()
 	}
 	return nil
 }
+
 func (p *proxy) authHeader() (string, string) { return p.config.AuthHeaderName, p.auth.authorization() }
 
 type headerTransport struct {
@@ -196,4 +202,5 @@ func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return t.base.RoundTrip(req)
 }
+
 func logSafe(message string) { log.Print(message) }
