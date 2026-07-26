@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,14 +13,18 @@ import (
 )
 
 type proxy struct {
-	config  Config
-	version string
-	filter  toolFilter
-	remote  *mcp.ClientSession
-	server  *mcp.Server
-	auth    *tokenManager
-	syncMu  sync.Mutex
-	httpServer *http.Server
+	config        Config
+	version       string
+	filter        toolFilter
+	remote        *mcp.ClientSession
+	server        *mcp.Server
+	auth          *tokenManager
+	syncMu        sync.Mutex
+	httpServer    *http.Server
+	toolNames     []string
+	resourceURIs  []string
+	templateURIs  []string
+	promptNames   []string
 }
 
 func newProxy(ctx context.Context, config Config, version string) (*proxy, error) {
@@ -84,10 +89,24 @@ func (p *proxy) refreshTools(ctx context.Context) error {
 	}
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
+	current := make(map[string]bool, len(toolsResult.Tools))
 	for _, tool := range toolsResult.Tools {
 		if !p.filter.allowed(tool.Name) {
 			continue
 		}
+		current[tool.Name] = true
+	}
+	for _, name := range p.toolNames {
+		if !current[name] {
+			p.server.RemoveTools(name)
+		}
+	}
+	p.toolNames = nil
+	for _, tool := range toolsResult.Tools {
+		if !current[tool.Name] {
+			continue
+		}
+		p.toolNames = append(p.toolNames, tool.Name)
 		tool := tool
 		p.server.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			if !p.filter.allowed(req.Params.Name) {
@@ -96,9 +115,18 @@ func (p *proxy) refreshTools(ctx context.Context) error {
 					IsError: true,
 				}, nil
 			}
+			var args any
+			if len(req.Params.Arguments) > 0 {
+				if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+					return &mcp.CallToolResult{
+						Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+						IsError: true,
+					}, nil
+				}
+			}
 			result, err := p.remote.CallTool(ctx, &mcp.CallToolParams{
 				Name:      req.Params.Name,
-				Arguments: req.Params.Arguments,
+				Arguments: args,
 			})
 			if err != nil {
 				return &mcp.CallToolResult{
@@ -119,7 +147,18 @@ func (p *proxy) refreshResources(ctx context.Context) {
 	}
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
+	current := make(map[string]bool, len(resourcesResult.Resources))
 	for _, resource := range resourcesResult.Resources {
+		current[resource.URI] = true
+	}
+	for _, uri := range p.resourceURIs {
+		if !current[uri] {
+			p.server.RemoveResources(uri)
+		}
+	}
+	p.resourceURIs = nil
+	for _, resource := range resourcesResult.Resources {
+		p.resourceURIs = append(p.resourceURIs, resource.URI)
 		resource := resource
 		p.server.AddResource(resource, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 			return p.remote.ReadResource(ctx, &mcp.ReadResourceParams{URI: req.Params.URI})
@@ -134,7 +173,18 @@ func (p *proxy) refreshResourceTemplates(ctx context.Context) {
 	}
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
+	current := make(map[string]bool, len(templatesResult.ResourceTemplates))
 	for _, template := range templatesResult.ResourceTemplates {
+		current[template.URITemplate] = true
+	}
+	for _, uri := range p.templateURIs {
+		if !current[uri] {
+			p.server.RemoveResourceTemplates(uri)
+		}
+	}
+	p.templateURIs = nil
+	for _, template := range templatesResult.ResourceTemplates {
+		p.templateURIs = append(p.templateURIs, template.URITemplate)
 		template := template
 		p.server.AddResourceTemplate(template, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 			return p.remote.ReadResource(ctx, &mcp.ReadResourceParams{URI: req.Params.URI})
@@ -149,7 +199,18 @@ func (p *proxy) refreshPrompts(ctx context.Context) {
 	}
 	p.syncMu.Lock()
 	defer p.syncMu.Unlock()
+	current := make(map[string]bool, len(promptsResult.Prompts))
 	for _, prompt := range promptsResult.Prompts {
+		current[prompt.Name] = true
+	}
+	for _, name := range p.promptNames {
+		if !current[name] {
+			p.server.RemovePrompts(name)
+		}
+	}
+	p.promptNames = nil
+	for _, prompt := range promptsResult.Prompts {
+		p.promptNames = append(p.promptNames, prompt.Name)
 		prompt := prompt
 		p.server.AddPrompt(prompt, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 			return p.remote.GetPrompt(ctx, &mcp.GetPromptParams{
