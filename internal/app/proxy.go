@@ -94,6 +94,10 @@ func (p *proxy) refreshTools(ctx context.Context) error {
 		if !p.filter.allowed(tool.Name) {
 			continue
 		}
+		if !validInputSchema(tool.InputSchema) {
+			log.Printf("warning: skipping tool %q: inputSchema must be a JSON object with type \"object\"", tool.Name)
+			continue
+		}
 		current[tool.Name] = true
 	}
 	for _, name := range p.toolNames {
@@ -138,6 +142,19 @@ func (p *proxy) refreshTools(ctx context.Context) error {
 		})
 	}
 	return nil
+}
+
+// validInputSchema reports whether schema is a non-nil JSON object schema with
+// type "object", satisfying the constraint required by Server.AddTool.
+func validInputSchema(schema any) bool {
+	if schema == nil {
+		return false
+	}
+	m, ok := schema.(map[string]any)
+	if !ok {
+		return false
+	}
+	return m["type"] == "object"
 }
 
 func (p *proxy) refreshResources(ctx context.Context) {
