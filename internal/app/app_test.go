@@ -108,6 +108,27 @@ func TestOAuthRequestAndRefreshSchedule(t *testing.T) {
 	}
 }
 
+func TestValidInputSchema(t *testing.T) {
+	cases := []struct {
+		schema any
+		want   bool
+	}{
+		{nil, false},
+		{map[string]any{}, false},
+		{map[string]any{"type": "array"}, false},
+		{map[string]any{"type": "string"}, false},
+		{map[string]any{"type": "object"}, true},
+		{map[string]any{"type": "object", "properties": map[string]any{}}, true},
+		{"string schema", false},
+		{42, false},
+	}
+	for _, tc := range cases {
+		if got := validInputSchema(tc.schema); got != tc.want {
+			t.Errorf("validInputSchema(%#v) = %v, want %v", tc.schema, got, tc.want)
+		}
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

@@ -82,10 +82,7 @@ func (m *tokenManager) refreshLoop() {
 		m.mu.RLock()
 		until := time.Until(m.expires)
 		m.mu.RUnlock()
-		wait := until - time.Minute
-		if wait < time.Second {
-			wait = time.Second
-		}
+		wait := max(until-time.Minute, time.Second)
 		time.Sleep(wait)
 		if err := m.refresh(context.Background()); err != nil {
 			logSafe("OAuth token refresh failed: " + err.Error())

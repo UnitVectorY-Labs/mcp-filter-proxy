@@ -14,7 +14,7 @@ func newToolFilter(include, exclude string) (toolFilter, error) {
 }
 func parsePatterns(raw string, include bool) ([]string, error) {
 	var patterns []string
-	for _, p := range strings.Split(raw, ",") {
+	for p := range strings.SplitSeq(raw, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			patterns = append(patterns, p)
 		}
