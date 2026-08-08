@@ -242,7 +242,7 @@ func (p *proxy) Serve() error {
 	if p.config.Transport == "http" {
 		handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 			return p.server
-		}, nil)
+		}, &mcp.StreamableHTTPOptions{Stateless: true})
 		p.httpServer = &http.Server{Addr: p.config.ListenAddr, Handler: handler}
 		return p.httpServer.ListenAndServe()
 	}
