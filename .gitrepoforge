@@ -12,3 +12,4 @@ config:
     enabled: false
   docs:
     enabled: true
+    domain: mcp-filter-proxy.unitvectorylabs.com
