@@ -1,6 +1,6 @@
 module github.com/UnitVectorY-Labs/mcp-filter-proxy
 
-go 1.26.0 // GOVERSION
+go 1.27.0 // GOVERSION
 
 require github.com/modelcontextprotocol/go-sdk v1.7.0
 
