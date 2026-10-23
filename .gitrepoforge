@@ -1,6 +1,7 @@
 name: mcp-filter-proxy
 default_branch: main
 config:
+  osv: sarif
   description: "An MCP server that proxies requests to a remote MCP server while supporting tool filtering and auth header injection."
   license: MIT
   language: go
