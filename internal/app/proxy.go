@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,18 +13,18 @@ import (
 )
 
 type proxy struct {
-	config        Config
-	version       string
-	filter        toolFilter
-	remote        *mcp.ClientSession
-	server        *mcp.Server
-	auth          *tokenManager
-	syncMu        sync.Mutex
-	httpServer    *http.Server
-	toolNames     []string
-	resourceURIs  []string
-	templateURIs  []string
-	promptNames   []string
+	config       Config
+	version      string
+	filter       toolFilter
+	remote       *mcp.ClientSession
+	server       *mcp.Server
+	auth         *tokenManager
+	syncMu       sync.Mutex
+	httpServer   *http.Server
+	toolNames    []string
+	resourceURIs []string
+	templateURIs []string
+	promptNames  []string
 }
 
 func newProxy(ctx context.Context, config Config, version string) (*proxy, error) {
