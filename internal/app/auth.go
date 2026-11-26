@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,7 +64,7 @@ func (m *tokenManager) refresh(ctx context.Context) error {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   int64  `json:"expires_in"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+	if err := json.UnmarshalRead(io.LimitReader(resp.Body, 1<<20), &result); err != nil {
 		return err
 	}
 	if result.AccessToken == "" || result.ExpiresIn <= 0 {
